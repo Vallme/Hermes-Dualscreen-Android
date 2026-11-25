@@ -1,4 +1,3 @@
-
 name: HERMES DUALSCREEN Android Build
 
 on:
@@ -34,8 +33,19 @@ jobs:
         with:
           gradle-version: '8.9'
 
+      - name: Diagnose AndroidManifest
+        run: |
+          echo "===== MANIFEST CONTENT ====="
+          cat -n app/src/main/AndroidManifest.xml
+          echo "===== XML VALIDATION ====="
+          python3 - <<'PY'
+          import xml.etree.ElementTree as ET
+          ET.parse("app/src/main/AndroidManifest.xml")
+          print("XML VALID")
+          PY
+
       - name: Build APK
-        run: gradle --no-daemon assembleDebug
+        run: gradle --no-daemon assembleDebug --stacktrace
 
       - name: Verify APK
         run: |
