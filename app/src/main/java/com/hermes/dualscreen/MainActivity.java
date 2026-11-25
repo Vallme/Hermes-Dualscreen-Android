@@ -2,20 +2,17 @@
 package com.hermes.dualscreen;
 
 import android.app.Activity;
-import android.app.Presentation;
-import android.content.Context;
 import android.content.Intent;
-import android.graphics.Canvas;
-import android.graphics.Color;
-import android.graphics.Paint;
 import android.hardware.display.DisplayManager;
 import android.hardware.display.VirtualDisplay;
 import android.media.MediaCodec;
 import android.media.MediaFormat;
+import android.media.projection.MediaProjection;
+import android.media.projection.MediaProjectionManager;
 import android.os.Bundle;
-import android.view.Display;
+import android.os.Handler;
+import android.os.Looper;
 import android.view.Surface;
-import android.view.View;
 import android.widget.Button;
 import android.widget.LinearLayout;
 import android.widget.TextView;
@@ -25,21 +22,24 @@ import java.util.concurrent.atomic.AtomicBoolean;
 
 public class MainActivity extends Activity {
 
+    private static final int REQUEST_CAPTURE = 8646;
+    private static final int WIDTH = 1280;
+    private static final int HEIGHT = 720;
+
     private TextView status;
     private MediaCodec encoder;
     private VirtualDisplay virtualDisplay;
-    private Presentation presentation;
     private Surface encoderSurface;
+    private MediaProjection mediaProjection;
+    private MediaProjection.Callback projectionCallback;
     private Thread encoderThread;
     private H264StreamServer streamServer;
 
     private final AtomicBoolean running = new AtomicBoolean(false);
+    private final Handler handler = new Handler(Looper.getMainLooper());
 
     private volatile int frameCount = 0;
     private volatile String codecName = "Belum aktif";
-
-    private static final int WIDTH = 1280;
-    private static final int HEIGHT = 720;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -54,11 +54,11 @@ public class MainActivity extends Activity {
         title.setTextSize(24);
 
         status = new TextView(this);
-        status.setText("Siap memulai server H.264");
+        status.setText("Siap memulai screen capture");
 
         Button start = new Button(this);
         start.setText("START STREAMING");
-        start.setOnClickListener(v -> startEncoder());
+        start.setOnClickListener(v -> requestScreenCapture());
 
         Button stop = new Button(this);
         stop.setText("STOP STREAMING");
@@ -79,172 +79,169 @@ public class MainActivity extends Activity {
         setContentView(layout);
     }
 
-    private void startEncoder() {
+    private void requestScreenCapture() {
         if (running.get()) return;
 
-        status.setText("Memulai H.264 encoder...");
+        MediaProjectionManager manager =
+            (MediaProjectionManager) getSystemService(
+                MEDIA_PROJECTION_SERVICE
+            );
+
+        status.setText("Meminta izin Screen Capture...");
+        startActivityForResult(
+            manager.createScreenCaptureIntent(),
+            REQUEST_CAPTURE
+        );
+    }
+
+    @Override
+    protected void onActivityResult(
+        int requestCode,
+        int resultCode,
+        Intent data
+    ) {
+        super.onActivityResult(requestCode, resultCode, data);
+
+        if (requestCode != REQUEST_CAPTURE) return;
+
+        if (resultCode != RESULT_OK || data == null) {
+            status.setText("Izin Screen Capture ditolak.");
+            return;
+        }
+
+        status.setText("Izin diterima. Menyiapkan streaming...");
+
+        Intent serviceIntent =
+            new Intent(this, ProjectionForegroundService.class);
 
         try {
-            streamServer = new H264StreamServer();
-            streamServer.start();
+            startForegroundService(serviceIntent);
 
-            MediaFormat format = MediaFormat.createVideoFormat(
-                MediaFormat.MIMETYPE_VIDEO_AVC,
-                WIDTH,
-                HEIGHT
-            );
-
-            format.setInteger(
-                MediaFormat.KEY_COLOR_FORMAT,
-                android.media.MediaCodecInfo.CodecCapabilities.COLOR_FormatSurface
-            );
-
-            format.setInteger(MediaFormat.KEY_BIT_RATE, 2000000);
-            format.setInteger(MediaFormat.KEY_FRAME_RATE, 30);
-            format.setInteger(MediaFormat.KEY_I_FRAME_INTERVAL, 1);
-
-            encoder = MediaCodec.createEncoderByType(
-                MediaFormat.MIMETYPE_VIDEO_AVC
-            );
-
-            codecName = encoder.getName();
-
-            encoder.configure(
-                format,
-                null,
-                null,
-                MediaCodec.CONFIGURE_FLAG_ENCODE
-            );
-
-            encoderSurface = encoder.createInputSurface();
-            encoder.start();
-
-            DisplayManager manager =
-                (DisplayManager) getSystemService(DISPLAY_SERVICE);
-
-            virtualDisplay = manager.createVirtualDisplay(
-                "HERMES_WORKSPACE",
-                WIDTH,
-                HEIGHT,
-                getResources().getDisplayMetrics().densityDpi,
-                encoderSurface,
-                DisplayManager.VIRTUAL_DISPLAY_FLAG_PUBLIC |
-                DisplayManager.VIRTUAL_DISPLAY_FLAG_PRESENTATION
-            );
-
-            if (virtualDisplay == null) {
-                throw new RuntimeException(
-                    "Virtual Display gagal dibuat"
-                );
-            }
-
-            Display display = virtualDisplay.getDisplay();
-
-            if (display == null) {
-                throw new RuntimeException(
-                    "Display virtual tidak tersedia"
-                );
-            }
-
-            presentation = new Presentation(this, display);
-            presentation.setContentView(new AnimatedTestView(this));
-            presentation.show();
-
-            frameCount = 0;
-            running.set(true);
-
-            encoderThread = new Thread(
-                this::drainEncoder,
-                "Hermes-Encoder"
-            );
-
-            encoderThread.start();
-
-            status.setText(
-                "SERVER AKTIF\n" +
-                "Port: 8644\n" +
-                "Codec: " + codecName +
-                "\nDisplay ID: " + display.getDisplayId() +
-                "\nDisplay: PUBLIC\n" +
-                "Menunggu koneksi HONOR..."
-            );
+            handler.postDelayed(() -> {
+                try {
+                    startProjection(resultCode, data);
+                } catch (Exception e) {
+                    stopEncoderResources();
+                    status.setText(
+                        "START ERROR: " +
+                        e.getClass().getSimpleName() +
+                        "\n" + String.valueOf(e.getMessage())
+                    );
+                }
+            }, 500);
 
         } catch (Exception e) {
-
-            String error =
-                "START ERROR: " +
+            status.setText(
+                "SERVICE ERROR: " +
                 e.getClass().getSimpleName() +
-                "\n" + String.valueOf(e.getMessage());
-
-            stopEncoderResources();
-
-            running.set(false);
-            status.setText(error);
+                "\n" + String.valueOf(e.getMessage())
+            );
         }
     }
 
-    private class AnimatedTestView extends View {
+    private void startProjection(int resultCode, Intent data)
+        throws Exception {
 
-        private final Paint paint =
-            new Paint(Paint.ANTI_ALIAS_FLAG);
+        MediaProjectionManager manager =
+            (MediaProjectionManager) getSystemService(
+                MEDIA_PROJECTION_SERVICE
+            );
 
-        private final long startTime =
-            System.currentTimeMillis();
+        mediaProjection =
+            manager.getMediaProjection(resultCode, data);
 
-        AnimatedTestView(Context context) {
-            super(context);
+        if (mediaProjection == null) {
+            throw new RuntimeException("MediaProjection tidak tersedia");
         }
 
-        @Override
-        protected void onDraw(Canvas canvas) {
-            canvas.drawColor(Color.rgb(15, 25, 40));
+        projectionCallback = new MediaProjection.Callback() {
+            @Override
+            public void onStop() {
+                mediaProjection = null;
+                running.set(false);
 
-            paint.setColor(Color.CYAN);
-            paint.setTextSize(48);
-            canvas.drawText(
-                "HERMES DUALSCREEN",
-                50,
-                100,
-                paint
-            );
+                runOnUiThread(() -> {
+                    stopEncoderResources();
+                    status.setText("Screen Capture dihentikan Android.");
+                });
+            }
+        };
 
-            paint.setColor(Color.WHITE);
-            paint.setTextSize(32);
-            canvas.drawText(
-                "H264 WIFI STREAM TEST",
-                50,
-                170,
-                paint
-            );
+        mediaProjection.registerCallback(projectionCallback, handler);
 
-            float x = 80 +
-                (System.currentTimeMillis() - startTime) % 900;
+        streamServer = new H264StreamServer();
+        streamServer.start();
 
-            paint.setColor(Color.GREEN);
-            canvas.drawCircle(x, 350, 45, paint);
+        MediaFormat format = MediaFormat.createVideoFormat(
+            MediaFormat.MIMETYPE_VIDEO_AVC,
+            WIDTH,
+            HEIGHT
+        );
 
-            paint.setColor(Color.WHITE);
-            paint.setTextSize(24);
-            canvas.drawText(
-                "Rendering active",
-                50,
-                500,
-                paint
-            );
+        format.setInteger(
+            MediaFormat.KEY_COLOR_FORMAT,
+            android.media.MediaCodecInfo.CodecCapabilities.COLOR_FormatSurface
+        );
+        format.setInteger(MediaFormat.KEY_BIT_RATE, 2000000);
+        format.setInteger(MediaFormat.KEY_FRAME_RATE, 30);
+        format.setInteger(MediaFormat.KEY_I_FRAME_INTERVAL, 1);
 
-            postInvalidateDelayed(33);
+        encoder = MediaCodec.createEncoderByType(
+            MediaFormat.MIMETYPE_VIDEO_AVC
+        );
+
+        codecName = encoder.getName();
+
+        encoder.configure(
+            format,
+            null,
+            null,
+            MediaCodec.CONFIGURE_FLAG_ENCODE
+        );
+
+        encoderSurface = encoder.createInputSurface();
+        encoder.start();
+
+        virtualDisplay = mediaProjection.createVirtualDisplay(
+            "HERMES_SCREEN_CAPTURE",
+            WIDTH,
+            HEIGHT,
+            getResources().getDisplayMetrics().densityDpi,
+            DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR,
+            encoderSurface,
+            null,
+            handler
+        );
+
+        if (virtualDisplay == null) {
+            throw new RuntimeException("Virtual Display gagal dibuat");
         }
+
+        frameCount = 0;
+        running.set(true);
+
+        encoderThread = new Thread(
+            this::drainEncoder,
+            "Hermes-Encoder"
+        );
+
+        encoderThread.start();
+
+        status.setText(
+            "SCREEN STREAMING AKTIF\n" +
+            "Port: 8644\n" +
+            "Codec: " + codecName +
+            "\nResolusi: 1280x720\n" +
+            "Menunggu koneksi HONOR..."
+        );
     }
 
     private void drainEncoder() {
-        MediaCodec.BufferInfo info =
-            new MediaCodec.BufferInfo();
+        MediaCodec.BufferInfo info = new MediaCodec.BufferInfo();
 
         try {
             while (running.get()) {
-
                 MediaCodec currentEncoder = encoder;
-
                 if (currentEncoder == null) break;
 
                 int index = currentEncoder.dequeueOutputBuffer(
@@ -253,14 +250,11 @@ public class MainActivity extends Activity {
                 );
 
                 if (index >= 0) {
-
                     ByteBuffer buffer =
                         currentEncoder.getOutputBuffer(index);
 
                     if (buffer != null && info.size > 0) {
-
                         ByteBuffer data = buffer.duplicate();
-
                         data.position(info.offset);
                         data.limit(info.offset + info.size);
 
@@ -285,26 +279,23 @@ public class MainActivity extends Activity {
                         }
 
                         if (type == 1) {
-
                             frameCount++;
 
                             if (frameCount % 30 == 0) {
-
                                 int count = frameCount;
 
-                                H264StreamServer currentServer =
-                                    streamServer;
-
-                                boolean connected =
-                                    currentServer != null &&
-                                    currentServer.isConnected();
-
                                 runOnUiThread(() -> {
-
                                     if (!running.get()) return;
 
+                                    H264StreamServer currentServer =
+                                        streamServer;
+
+                                    boolean connected =
+                                        currentServer != null &&
+                                        currentServer.isConnected();
+
                                     status.setText(
-                                        "H.264 STREAMING AKTIF\n" +
+                                        "SCREEN STREAMING AKTIF\n" +
                                         "Codec: " + codecName +
                                         "\nFrame: " + count +
                                         "\nHONOR: " +
@@ -317,15 +308,10 @@ public class MainActivity extends Activity {
                         }
                     }
 
-                    currentEncoder.releaseOutputBuffer(
-                        index,
-                        false
-                    );
+                    currentEncoder.releaseOutputBuffer(index, false);
                 }
             }
-
         } catch (Exception e) {
-
             String error =
                 "STREAM ERROR: " +
                 e.getClass().getSimpleName() +
@@ -333,8 +319,7 @@ public class MainActivity extends Activity {
 
             runOnUiThread(() -> {
                 if (running.get()) {
-                    stopEncoderResources();
-                    running.set(false);
+                    stopEncoder();
                     status.setText(error);
                 }
             });
@@ -342,15 +327,7 @@ public class MainActivity extends Activity {
     }
 
     private void stopEncoderResources() {
-
         running.set(false);
-
-        if (presentation != null) {
-            try {
-                presentation.dismiss();
-            } catch (Exception ignored) {}
-            presentation = null;
-        }
 
         if (virtualDisplay != null) {
             try {
@@ -358,6 +335,18 @@ public class MainActivity extends Activity {
             } catch (Exception ignored) {}
             virtualDisplay = null;
         }
+
+        if (mediaProjection != null) {
+            try {
+                if (projectionCallback != null) {
+                    mediaProjection.unregisterCallback(projectionCallback);
+                }
+                mediaProjection.stop();
+            } catch (Exception ignored) {}
+            mediaProjection = null;
+        }
+
+        projectionCallback = null;
 
         if (encoder != null) {
             try {
@@ -384,28 +373,25 @@ public class MainActivity extends Activity {
             } catch (Exception ignored) {}
             streamServer = null;
         }
+
+        stopService(new Intent(this, ProjectionForegroundService.class));
     }
 
     private void stopEncoder() {
-
         running.set(false);
 
-        Thread currentThread = encoderThread;
+        Thread thread = encoderThread;
+        encoderThread = null;
 
-        if (currentThread != null &&
-            currentThread != Thread.currentThread()) {
-
+        if (thread != null && thread != Thread.currentThread()) {
             try {
-                currentThread.join(500);
+                thread.join(500);
             } catch (InterruptedException e) {
                 Thread.currentThread().interrupt();
             }
         }
 
-        encoderThread = null;
-
         stopEncoderResources();
-
         status.setText("Streaming dihentikan.");
     }
 
