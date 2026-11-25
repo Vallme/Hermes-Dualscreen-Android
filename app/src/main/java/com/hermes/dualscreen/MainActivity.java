@@ -1,3 +1,4 @@
+
 package com.hermes.dualscreen;
 
 import android.app.Activity;
@@ -107,9 +108,14 @@ public class MainActivity extends Activity {
                 MediaFormat.KEY_COLOR_FORMAT,
                 android.media.MediaCodecInfo.CodecCapabilities.COLOR_FormatSurface
             );
+
             format.setInteger(MediaFormat.KEY_BIT_RATE, 3000000);
             format.setInteger(MediaFormat.KEY_FRAME_RATE, 30);
             format.setInteger(MediaFormat.KEY_I_FRAME_INTERVAL, 1);
+
+            // Optimasi encoder untuk streaming real-time
+            format.setInteger(MediaFormat.KEY_MAX_B_FRAMES, 0);
+            format.setInteger(MediaFormat.KEY_PRIORITY, 0);
 
             encoder = MediaCodec.createEncoderByType(
                 MediaFormat.MIMETYPE_VIDEO_AVC
@@ -171,6 +177,7 @@ public class MainActivity extends Activity {
                 this::drainEncoder,
                 "Hermes-Encoder"
             );
+
             encoderThread.start();
 
             boolean supported = getPackageManager().hasSystemFeature(
@@ -287,8 +294,9 @@ public class MainActivity extends Activity {
                 MediaCodec currentEncoder = encoder;
                 if (currentEncoder == null) break;
 
+                // Polling lebih singkat untuk mengurangi antrean
                 int index = currentEncoder.dequeueOutputBuffer(
-                    info, 10000
+                    info, 1000
                 );
 
                 if (index >= 0) {
@@ -391,9 +399,11 @@ public class MainActivity extends Activity {
             try {
                 encoder.stop();
             } catch (Exception ignored) {}
+
             try {
                 encoder.release();
             } catch (Exception ignored) {}
+
             encoder = null;
         }
 
@@ -435,4 +445,4 @@ public class MainActivity extends Activity {
         stopEncoder();
         super.onDestroy();
     }
-    }
+}
