@@ -1,18 +1,23 @@
-
 package com.hermes.dualscreen;
 
 import android.app.Activity;
+import android.app.ActivityOptions;
+import android.app.Presentation;
+import android.content.Context;
 import android.content.Intent;
+import android.content.pm.PackageManager;
+import android.graphics.Canvas;
+import android.graphics.Color;
+import android.graphics.Paint;
 import android.hardware.display.DisplayManager;
 import android.hardware.display.VirtualDisplay;
 import android.media.MediaCodec;
 import android.media.MediaFormat;
-import android.media.projection.MediaProjection;
-import android.media.projection.MediaProjectionManager;
 import android.os.Bundle;
-import android.os.Handler;
-import android.os.Looper;
+import android.provider.Settings;
+import android.view.Display;
 import android.view.Surface;
+import android.view.View;
 import android.widget.Button;
 import android.widget.LinearLayout;
 import android.widget.TextView;
@@ -22,24 +27,23 @@ import java.util.concurrent.atomic.AtomicBoolean;
 
 public class MainActivity extends Activity {
 
-    private static final int REQUEST_CAPTURE = 8646;
-    private static final int WIDTH = 1280;
-    private static final int HEIGHT = 720;
-
     private TextView status;
     private MediaCodec encoder;
     private VirtualDisplay virtualDisplay;
+    private Presentation presentation;
     private Surface encoderSurface;
-    private MediaProjection mediaProjection;
-    private MediaProjection.Callback projectionCallback;
     private Thread encoderThread;
     private H264StreamServer streamServer;
 
     private final AtomicBoolean running = new AtomicBoolean(false);
-    private final Handler handler = new Handler(Looper.getMainLooper());
 
     private volatile int frameCount = 0;
     private volatile String codecName = "Belum aktif";
+
+    private static final int WIDTH = 1280;
+    private static final int HEIGHT = 720;
+
+    private int secondaryDisplayId = -1;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -54,15 +58,15 @@ public class MainActivity extends Activity {
         title.setTextSize(24);
 
         status = new TextView(this);
-        status.setText("Siap memulai screen capture");
+        status.setText("Siap membuat extended display");
 
         Button start = new Button(this);
-        start.setText("START STREAMING");
-        start.setOnClickListener(v -> requestScreenCapture());
+        start.setText("START EXTENDED DISPLAY");
+        start.setOnClickListener(v -> startEncoder());
 
-        Button stop = new Button(this);
-        stop.setText("STOP STREAMING");
-        stop.setOnClickListener(v -> stopEncoder());
+        Button settings = new Button(this);
+        settings.setText("OPEN SETTINGS ON HONOR");
+        settings.setOnClickListener(v -> openSettingsOnDisplay());
 
         Button receiver = new Button(this);
         receiver.setText("OPEN RECEIVER");
@@ -70,174 +74,211 @@ public class MainActivity extends Activity {
             startActivity(new Intent(this, ReceiverActivity.class))
         );
 
+        Button stop = new Button(this);
+        stop.setText("STOP DISPLAY");
+        stop.setOnClickListener(v -> stopEncoder());
+
         layout.addView(title);
         layout.addView(status);
         layout.addView(start);
-        layout.addView(stop);
+        layout.addView(settings);
         layout.addView(receiver);
+        layout.addView(stop);
 
         setContentView(layout);
     }
 
-    private void requestScreenCapture() {
+    private void startEncoder() {
         if (running.get()) return;
 
-        MediaProjectionManager manager =
-            (MediaProjectionManager) getSystemService(
-                MEDIA_PROJECTION_SERVICE
+        status.setText("Membuat virtual display non-mirroring...");
+
+        try {
+            streamServer = new H264StreamServer();
+            streamServer.start();
+
+            MediaFormat format = MediaFormat.createVideoFormat(
+                MediaFormat.MIMETYPE_VIDEO_AVC,
+                WIDTH,
+                HEIGHT
             );
 
-        status.setText("Meminta izin Screen Capture...");
-        startActivityForResult(
-            manager.createScreenCaptureIntent(),
-            REQUEST_CAPTURE
-        );
+            format.setInteger(
+                MediaFormat.KEY_COLOR_FORMAT,
+                android.media.MediaCodecInfo.CodecCapabilities.COLOR_FormatSurface
+            );
+            format.setInteger(MediaFormat.KEY_BIT_RATE, 3000000);
+            format.setInteger(MediaFormat.KEY_FRAME_RATE, 30);
+            format.setInteger(MediaFormat.KEY_I_FRAME_INTERVAL, 1);
+
+            encoder = MediaCodec.createEncoderByType(
+                MediaFormat.MIMETYPE_VIDEO_AVC
+            );
+
+            codecName = encoder.getName();
+
+            encoder.configure(
+                format,
+                null,
+                null,
+                MediaCodec.CONFIGURE_FLAG_ENCODE
+            );
+
+            encoderSurface = encoder.createInputSurface();
+            encoder.start();
+
+            DisplayManager manager =
+                (DisplayManager) getSystemService(DISPLAY_SERVICE);
+
+            int flags =
+                DisplayManager.VIRTUAL_DISPLAY_FLAG_PUBLIC |
+                DisplayManager.VIRTUAL_DISPLAY_FLAG_PRESENTATION |
+                DisplayManager.VIRTUAL_DISPLAY_FLAG_OWN_CONTENT_ONLY;
+
+            virtualDisplay = manager.createVirtualDisplay(
+                "HERMES_WORKSPACE",
+                WIDTH,
+                HEIGHT,
+                getResources().getDisplayMetrics().densityDpi,
+                encoderSurface,
+                flags
+            );
+
+            if (virtualDisplay == null) {
+                throw new RuntimeException(
+                    "Virtual display gagal dibuat"
+                );
+            }
+
+            Display display = virtualDisplay.getDisplay();
+
+            if (display == null) {
+                throw new RuntimeException(
+                    "Display tidak tersedia"
+                );
+            }
+
+            secondaryDisplayId = display.getDisplayId();
+
+            presentation = new Presentation(this, display);
+            presentation.setContentView(new AnimatedTestView(this));
+            presentation.show();
+
+            frameCount = 0;
+            running.set(true);
+
+            encoderThread = new Thread(
+                this::drainEncoder,
+                "Hermes-Encoder"
+            );
+            encoderThread.start();
+
+            boolean supported = getPackageManager().hasSystemFeature(
+                PackageManager.FEATURE_ACTIVITIES_ON_SECONDARY_DISPLAYS
+            );
+
+            status.setText(
+                "EXTENDED DISPLAY AKTIF\n" +
+                "Display ID: " + secondaryDisplayId +
+                "\nMode: PUBLIC + OWN_CONTENT_ONLY" +
+                "\nMirroring: NONAKTIF" +
+                "\nAplikasi di display kedua: " +
+                (supported ? "DIDUKUNG" : "BELUM DIDUKUNG") +
+                "\nCodec: " + codecName +
+                "\nPort: 8644\nMenunggu HONOR..."
+            );
+
+        } catch (Exception e) {
+            String error =
+                "START ERROR: " +
+                e.getClass().getSimpleName() +
+                "\n" + String.valueOf(e.getMessage());
+
+            stopEncoderResources();
+            running.set(false);
+            status.setText(error);
+        }
     }
 
-    @Override
-    protected void onActivityResult(
-        int requestCode,
-        int resultCode,
-        Intent data
-    ) {
-        super.onActivityResult(requestCode, resultCode, data);
-
-        if (requestCode != REQUEST_CAPTURE) return;
-
-        if (resultCode != RESULT_OK || data == null) {
-            status.setText("Izin Screen Capture ditolak.");
+    private void openSettingsOnDisplay() {
+        if (!running.get() || secondaryDisplayId < 0) {
+            status.setText("Jalankan extended display terlebih dahulu.");
             return;
         }
 
-        status.setText("Izin diterima. Menyiapkan streaming...");
-
-        Intent serviceIntent =
-            new Intent(this, ProjectionForegroundService.class);
-
         try {
-            startForegroundService(serviceIntent);
+            Intent intent = new Intent(Settings.ACTION_SETTINGS);
+            intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
 
-            handler.postDelayed(() -> {
-                try {
-                    startProjection(resultCode, data);
-                } catch (Exception e) {
-                    stopEncoderResources();
-                    status.setText(
-                        "START ERROR: " +
-                        e.getClass().getSimpleName() +
-                        "\n" + String.valueOf(e.getMessage())
-                    );
-                }
-            }, 500);
+            ActivityOptions options = ActivityOptions.makeBasic();
+            options.setLaunchDisplayId(secondaryDisplayId);
+
+            startActivity(intent, options.toBundle());
+
+            status.setText(
+                "Permintaan membuka Settings pada display " +
+                secondaryDisplayId + " telah dikirim."
+            );
 
         } catch (Exception e) {
             status.setText(
-                "SERVICE ERROR: " +
+                "LAUNCH ERROR: " +
                 e.getClass().getSimpleName() +
                 "\n" + String.valueOf(e.getMessage())
             );
         }
     }
 
-    private void startProjection(int resultCode, Intent data)
-        throws Exception {
+    private class AnimatedTestView extends View {
 
-        MediaProjectionManager manager =
-            (MediaProjectionManager) getSystemService(
-                MEDIA_PROJECTION_SERVICE
+        private final Paint paint =
+            new Paint(Paint.ANTI_ALIAS_FLAG);
+
+        private final long startTime =
+            System.currentTimeMillis();
+
+        AnimatedTestView(Context context) {
+            super(context);
+        }
+
+        @Override
+        protected void onDraw(Canvas canvas) {
+            canvas.drawColor(Color.rgb(15, 25, 40));
+
+            paint.setColor(Color.CYAN);
+            paint.setTextSize(48);
+            canvas.drawText(
+                "HERMES EXTENDED DISPLAY",
+                50, 100, paint
             );
 
-        mediaProjection =
-            manager.getMediaProjection(resultCode, data);
+            paint.setColor(Color.WHITE);
+            paint.setTextSize(32);
+            canvas.drawText(
+                "NON-MIRRORING WORKSPACE",
+                50, 170, paint
+            );
 
-        if (mediaProjection == null) {
-            throw new RuntimeException("MediaProjection tidak tersedia");
+            float x = 80 +
+                (System.currentTimeMillis() - startTime) % 900;
+
+            paint.setColor(Color.GREEN);
+            canvas.drawCircle(x, 350, 45, paint);
+
+            paint.setColor(Color.WHITE);
+            paint.setTextSize(24);
+            canvas.drawText(
+                "Independent display rendering",
+                50, 500, paint
+            );
+
+            postInvalidateDelayed(33);
         }
-
-        projectionCallback = new MediaProjection.Callback() {
-            @Override
-            public void onStop() {
-                mediaProjection = null;
-                running.set(false);
-
-                runOnUiThread(() -> {
-                    stopEncoderResources();
-                    status.setText("Screen Capture dihentikan Android.");
-                });
-            }
-        };
-
-        mediaProjection.registerCallback(projectionCallback, handler);
-
-        streamServer = new H264StreamServer();
-        streamServer.start();
-
-        MediaFormat format = MediaFormat.createVideoFormat(
-            MediaFormat.MIMETYPE_VIDEO_AVC,
-            WIDTH,
-            HEIGHT
-        );
-
-        format.setInteger(
-            MediaFormat.KEY_COLOR_FORMAT,
-            android.media.MediaCodecInfo.CodecCapabilities.COLOR_FormatSurface
-        );
-        format.setInteger(MediaFormat.KEY_BIT_RATE, 2000000);
-        format.setInteger(MediaFormat.KEY_FRAME_RATE, 30);
-        format.setInteger(MediaFormat.KEY_I_FRAME_INTERVAL, 1);
-
-        encoder = MediaCodec.createEncoderByType(
-            MediaFormat.MIMETYPE_VIDEO_AVC
-        );
-
-        codecName = encoder.getName();
-
-        encoder.configure(
-            format,
-            null,
-            null,
-            MediaCodec.CONFIGURE_FLAG_ENCODE
-        );
-
-        encoderSurface = encoder.createInputSurface();
-        encoder.start();
-
-        virtualDisplay = mediaProjection.createVirtualDisplay(
-            "HERMES_SCREEN_CAPTURE",
-            WIDTH,
-            HEIGHT,
-            getResources().getDisplayMetrics().densityDpi,
-            DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR,
-            encoderSurface,
-            null,
-            handler
-        );
-
-        if (virtualDisplay == null) {
-            throw new RuntimeException("Virtual Display gagal dibuat");
-        }
-
-        frameCount = 0;
-        running.set(true);
-
-        encoderThread = new Thread(
-            this::drainEncoder,
-            "Hermes-Encoder"
-        );
-
-        encoderThread.start();
-
-        status.setText(
-            "SCREEN STREAMING AKTIF\n" +
-            "Port: 8644\n" +
-            "Codec: " + codecName +
-            "\nResolusi: 1280x720\n" +
-            "Menunggu koneksi HONOR..."
-        );
     }
 
     private void drainEncoder() {
-        MediaCodec.BufferInfo info = new MediaCodec.BufferInfo();
+        MediaCodec.BufferInfo info =
+            new MediaCodec.BufferInfo();
 
         try {
             while (running.get()) {
@@ -245,8 +286,7 @@ public class MainActivity extends Activity {
                 if (currentEncoder == null) break;
 
                 int index = currentEncoder.dequeueOutputBuffer(
-                    info,
-                    10000
+                    info, 10000
                 );
 
                 if (index >= 0) {
@@ -295,8 +335,9 @@ public class MainActivity extends Activity {
                                         currentServer.isConnected();
 
                                     status.setText(
-                                        "SCREEN STREAMING AKTIF\n" +
-                                        "Codec: " + codecName +
+                                        "EXTENDED DISPLAY AKTIF\n" +
+                                        "Display ID: " + secondaryDisplayId +
+                                        "\nCodec: " + codecName +
                                         "\nFrame: " + count +
                                         "\nHONOR: " +
                                         (connected
@@ -311,6 +352,7 @@ public class MainActivity extends Activity {
                     currentEncoder.releaseOutputBuffer(index, false);
                 }
             }
+
         } catch (Exception e) {
             String error =
                 "STREAM ERROR: " +
@@ -318,16 +360,23 @@ public class MainActivity extends Activity {
                 "\n" + String.valueOf(e.getMessage());
 
             runOnUiThread(() -> {
-                if (running.get()) {
-                    stopEncoder();
-                    status.setText(error);
-                }
+                stopEncoderResources();
+                running.set(false);
+                status.setText(error);
             });
         }
     }
 
     private void stopEncoderResources() {
         running.set(false);
+        secondaryDisplayId = -1;
+
+        if (presentation != null) {
+            try {
+                presentation.dismiss();
+            } catch (Exception ignored) {}
+            presentation = null;
+        }
 
         if (virtualDisplay != null) {
             try {
@@ -336,27 +385,13 @@ public class MainActivity extends Activity {
             virtualDisplay = null;
         }
 
-        if (mediaProjection != null) {
-            try {
-                if (projectionCallback != null) {
-                    mediaProjection.unregisterCallback(projectionCallback);
-                }
-                mediaProjection.stop();
-            } catch (Exception ignored) {}
-            mediaProjection = null;
-        }
-
-        projectionCallback = null;
-
         if (encoder != null) {
             try {
                 encoder.stop();
             } catch (Exception ignored) {}
-
             try {
                 encoder.release();
             } catch (Exception ignored) {}
-
             encoder = null;
         }
 
@@ -373,8 +408,6 @@ public class MainActivity extends Activity {
             } catch (Exception ignored) {}
             streamServer = null;
         }
-
-        stopService(new Intent(this, ProjectionForegroundService.class));
     }
 
     private void stopEncoder() {
@@ -392,7 +425,7 @@ public class MainActivity extends Activity {
         }
 
         stopEncoderResources();
-        status.setText("Streaming dihentikan.");
+        status.setText("Extended display dihentikan.");
     }
 
     @Override
@@ -400,4 +433,5 @@ public class MainActivity extends Activity {
         stopEncoder();
         super.onDestroy();
     }
-}
+            }
+                
