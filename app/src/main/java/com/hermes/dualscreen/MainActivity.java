@@ -202,7 +202,9 @@ public class MainActivity extends Activity {
 
     private void openSettingsOnDisplay() {
         if (!running.get() || secondaryDisplayId < 0) {
-            status.setText("Jalankan extended display terlebih dahulu.");
+            status.setText(
+                "Jalankan extended display terlebih dahulu."
+            );
             return;
         }
 
@@ -433,5 +435,4 @@ public class MainActivity extends Activity {
         stopEncoder();
         super.onDestroy();
     }
-            }
-                
+    }
