@@ -15,7 +15,6 @@ import android.hardware.display.VirtualDisplay;
 import android.media.MediaCodec;
 import android.media.MediaFormat;
 import android.os.Bundle;
-import android.provider.Settings;
 import android.view.Display;
 import android.view.Surface;
 import android.view.View;
@@ -50,6 +49,12 @@ public class MainActivity extends Activity {
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
 
+        // Mode pengujian aktivitas pada display kedua
+        if (getIntent().getBooleanExtra("HERMES_WORKSPACE_TEST", false)) {
+            showWorkspaceTestScreen();
+            return;
+        }
+
         LinearLayout layout = new LinearLayout(this);
         layout.setOrientation(LinearLayout.VERTICAL);
         layout.setPadding(32, 48, 32, 32);
@@ -66,7 +71,7 @@ public class MainActivity extends Activity {
         start.setOnClickListener(v -> startEncoder());
 
         Button settings = new Button(this);
-        settings.setText("OPEN SETTINGS ON HONOR");
+        settings.setText("OPEN WORKSPACE ON HONOR");
         settings.setOnClickListener(v -> openSettingsOnDisplay());
 
         Button receiver = new Button(this);
@@ -85,6 +90,40 @@ public class MainActivity extends Activity {
         layout.addView(settings);
         layout.addView(receiver);
         layout.addView(stop);
+
+        setContentView(layout);
+    }
+
+    private void showWorkspaceTestScreen() {
+        LinearLayout layout = new LinearLayout(this);
+        layout.setOrientation(LinearLayout.VERTICAL);
+        layout.setPadding(40, 80, 40, 40);
+
+        TextView title = new TextView(this);
+        title.setText("HERMES WORKSPACE");
+        title.setTextSize(28);
+        title.setTextColor(Color.CYAN);
+
+        TextView info = new TextView(this);
+        info.setText(
+            "INDEPENDENT ANDROID ACTIVITY\n\n" +
+            "Display ID: " +
+            (getDisplay() != null
+                ? getDisplay().getDisplayId()
+                : "UNKNOWN") +
+            "\nRunning on secondary display"
+        );
+        info.setTextSize(20);
+        info.setTextColor(Color.WHITE);
+
+        Button close = new Button(this);
+        close.setText("CLOSE WORKSPACE");
+        close.setOnClickListener(v -> finish());
+
+        layout.setBackgroundColor(Color.rgb(15, 25, 40));
+        layout.addView(title);
+        layout.addView(info);
+        layout.addView(close);
 
         setContentView(layout);
     }
@@ -112,8 +151,6 @@ public class MainActivity extends Activity {
             format.setInteger(MediaFormat.KEY_BIT_RATE, 3000000);
             format.setInteger(MediaFormat.KEY_FRAME_RATE, 30);
             format.setInteger(MediaFormat.KEY_I_FRAME_INTERVAL, 1);
-
-            // Optimasi encoder untuk streaming real-time
             format.setInteger(MediaFormat.KEY_MAX_B_FRAMES, 0);
             format.setInteger(MediaFormat.KEY_PRIORITY, 0);
 
@@ -216,8 +253,8 @@ public class MainActivity extends Activity {
         }
 
         try {
-            Intent intent = new Intent(Settings.ACTION_SETTINGS);
-            intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+            Intent intent = new Intent(this, MainActivity.class);
+            intent.putExtra("HERMES_WORKSPACE_TEST", true);
 
             ActivityOptions options = ActivityOptions.makeBasic();
             options.setLaunchDisplayId(secondaryDisplayId);
@@ -225,8 +262,7 @@ public class MainActivity extends Activity {
             startActivity(intent, options.toBundle());
 
             status.setText(
-                "Permintaan membuka Settings pada display " +
-                secondaryDisplayId + " telah dikirim."
+                "Membuka Hermes Workspace pada display kedua..."
             );
 
         } catch (Exception e) {
@@ -294,7 +330,6 @@ public class MainActivity extends Activity {
                 MediaCodec currentEncoder = encoder;
                 if (currentEncoder == null) break;
 
-                // Polling lebih singkat untuk mengurangi antrean
                 int index = currentEncoder.dequeueOutputBuffer(
                     info, 1000
                 );
