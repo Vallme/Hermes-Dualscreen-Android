@@ -19,6 +19,7 @@ import android.widget.Button;
 import android.widget.LinearLayout;
 import android.widget.TextView;
 
+import java.nio.ByteBuffer;
 import java.util.concurrent.atomic.AtomicBoolean;
 
 public class MainActivity extends Activity {
@@ -29,6 +30,7 @@ public class MainActivity extends Activity {
     private Presentation presentation;
     private Surface encoderSurface;
     private Thread encoderThread;
+    private H264StreamServer streamServer;
 
     private final AtomicBoolean running = new AtomicBoolean(false);
 
@@ -51,15 +53,14 @@ public class MainActivity extends Activity {
         title.setTextSize(24);
 
         status = new TextView(this);
-        status.setText("Siap menguji H.264");
-        status.setTextSize(16);
+        status.setText("Siap memulai server H.264");
 
         Button start = new Button(this);
-        start.setText("START H.264 TEST");
+        start.setText("START STREAMING");
         start.setOnClickListener(v -> startEncoder());
 
         Button stop = new Button(this);
-        stop.setText("STOP TEST");
+        stop.setText("STOP STREAMING");
         stop.setOnClickListener(v -> stopEncoder());
 
         layout.addView(title);
@@ -74,6 +75,9 @@ public class MainActivity extends Activity {
         if (running.get()) return;
 
         try {
+            streamServer = new H264StreamServer();
+            streamServer.start();
+
             MediaFormat format = MediaFormat.createVideoFormat(
                 MediaFormat.MIMETYPE_VIDEO_AVC,
                 WIDTH,
@@ -95,9 +99,7 @@ public class MainActivity extends Activity {
             codecName = encoder.getName();
 
             encoder.configure(
-                format,
-                null,
-                null,
+                format, null, null,
                 MediaCodec.CONFIGURE_FLAG_ENCODE
             );
 
@@ -134,9 +136,11 @@ public class MainActivity extends Activity {
             encoderThread.start();
 
             status.setText(
-                "ENCODER AKTIF\nCodec: " + codecName +
+                "SERVER AKTIF\n" +
+                "Port: 8644\n" +
+                "Codec: " + codecName +
                 "\nDisplay ID: " + display.getDisplayId() +
-                "\nMenunggu frame..."
+                "\nMenunggu koneksi HONOR..."
             );
 
         } catch (Exception e) {
@@ -151,17 +155,14 @@ public class MainActivity extends Activity {
     private class AnimatedTestView extends View {
 
         private final Paint paint = new Paint(Paint.ANTI_ALIAS_FLAG);
-        private long startTime = System.currentTimeMillis();
+        private final long startTime = System.currentTimeMillis();
 
         AnimatedTestView(Context context) {
             super(context);
-            setLayerType(View.LAYER_TYPE_SOFTWARE, null);
         }
 
         @Override
         protected void onDraw(Canvas canvas) {
-            super.onDraw(canvas);
-
             canvas.drawColor(Color.rgb(15, 25, 40));
 
             paint.setColor(Color.CYAN);
@@ -170,21 +171,17 @@ public class MainActivity extends Activity {
 
             paint.setColor(Color.WHITE);
             paint.setTextSize(32);
-            canvas.drawText("H264 LIVE FRAME TEST", 50, 170, paint);
+            canvas.drawText("H264 WIFI STREAM TEST", 50, 170, paint);
 
-            float x = 80 + (System.currentTimeMillis() - startTime) % 900;
+            float x = 80 +
+                (System.currentTimeMillis() - startTime) % 900;
 
             paint.setColor(Color.GREEN);
             canvas.drawCircle(x, 350, 45, paint);
 
             paint.setColor(Color.WHITE);
             paint.setTextSize(24);
-            canvas.drawText(
-                "Rendering active",
-                50,
-                500,
-                paint
-            );
+            canvas.drawText("Rendering active", 50, 500, paint);
 
             postInvalidateDelayed(33);
         }
@@ -198,49 +195,62 @@ public class MainActivity extends Activity {
                 int index = encoder.dequeueOutputBuffer(info, 10000);
 
                 if (index >= 0) {
-                    if (info.size > 0 &&
-                        (info.flags & MediaCodec.BUFFER_FLAG_CODEC_CONFIG) == 0) {
+                    ByteBuffer buffer = encoder.getOutputBuffer(index);
 
-                        frameCount++;
+                    if (buffer != null && info.size > 0) {
+                        ByteBuffer data = buffer.duplicate();
+                        data.position(info.offset);
+                        data.limit(info.offset + info.size);
 
-                        if (frameCount % 15 == 0) {
-                            int count = frameCount;
+                        byte[] packet = new byte[info.size];
+                        data.get(packet);
 
-                            runOnUiThread(() -> status.setText(
-                                "H.264 ENCODER BERHASIL\n" +
-                                "Codec: " + codecName +
-                                "\nFrame encoded: " + count
-                            ));
+                        int type =
+                            (info.flags & MediaCodec.BUFFER_FLAG_CODEC_CONFIG) != 0
+                            ? 0 : 1;
+
+                        streamServer.sendPacket(
+                            type,
+                            info.presentationTimeUs,
+                            packet,
+                            0,
+                            packet.length
+                        );
+
+                        if (type == 1) {
+                            frameCount++;
+
+                            if (frameCount % 30 == 0) {
+                                int count = frameCount;
+                                boolean connected = streamServer.isConnected();
+
+                                runOnUiThread(() -> status.setText(
+                                    "H.264 STREAMING AKTIF\n" +
+                                    "Codec: " + codecName +
+                                    "\nFrame: " + count +
+                                    "\nHONOR: " +
+                                    (connected ? "TERHUBUNG" : "MENUNGGU KONEKSI")
+                                ));
+                            }
                         }
                     }
 
                     encoder.releaseOutputBuffer(index, false);
-
-                } else if (index == MediaCodec.INFO_OUTPUT_FORMAT_CHANGED) {
-                    runOnUiThread(() ->
-                        status.setText(
-                            "FORMAT VIDEO TERSEDIA\nCodec: " + codecName +
-                            "\nMenunggu frame..."
-                        )
-                    );
                 }
             }
 
         } catch (Exception e) {
-            runOnUiThread(() ->
-                status.setText(
-                    "ENCODER ERROR:\n" +
-                    e.getClass().getSimpleName() +
-                    "\n" + e.getMessage()
-                )
-            );
+            runOnUiThread(() -> status.setText(
+                "STREAM ERROR:\n" + e.getMessage()
+            ));
         }
     }
 
     private void stopEncoder() {
         running.set(false);
 
-        if (encoderThread != null && encoderThread != Thread.currentThread()) {
+        if (encoderThread != null &&
+            encoderThread != Thread.currentThread()) {
             try {
                 encoderThread.join(500);
             } catch (InterruptedException e) {
@@ -262,14 +272,9 @@ public class MainActivity extends Activity {
         if (encoder != null) {
             try {
                 encoder.stop();
-            } catch (Exception ignored) {
-            }
+            } catch (Exception ignored) {}
 
-            try {
-                encoder.release();
-            } catch (Exception ignored) {
-            }
-
+            encoder.release();
             encoder = null;
         }
 
@@ -278,7 +283,12 @@ public class MainActivity extends Activity {
             encoderSurface = null;
         }
 
-        status.setText("Encoder dihentikan.");
+        if (streamServer != null) {
+            streamServer.stop();
+            streamServer = null;
+        }
+
+        status.setText("Streaming dihentikan.");
     }
 
     @Override
