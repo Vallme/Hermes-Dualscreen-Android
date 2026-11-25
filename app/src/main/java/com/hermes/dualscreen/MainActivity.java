@@ -124,7 +124,6 @@ public class MainActivity extends Activity {
                 getResources().getDisplayMetrics().densityDpi,
                 encoderSurface,
                 DisplayManager.VIRTUAL_DISPLAY_FLAG_PUBLIC |
-                DisplayManager.VIRTUAL_DISPLAY_FLAG_OWN_CONTENT_ONLY |
                 DisplayManager.VIRTUAL_DISPLAY_FLAG_PRESENTATION
             );
 
