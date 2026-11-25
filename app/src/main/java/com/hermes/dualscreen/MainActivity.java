@@ -123,6 +123,7 @@ public class MainActivity extends Activity {
                 HEIGHT,
                 getResources().getDisplayMetrics().densityDpi,
                 encoderSurface,
+                DisplayManager.VIRTUAL_DISPLAY_FLAG_PUBLIC |
                 DisplayManager.VIRTUAL_DISPLAY_FLAG_OWN_CONTENT_ONLY |
                 DisplayManager.VIRTUAL_DISPLAY_FLAG_PRESENTATION
             );
@@ -148,7 +149,8 @@ public class MainActivity extends Activity {
                 "Port: 8644\n" +
                 "Codec: " + codecName +
                 "\nDisplay ID: " + display.getDisplayId() +
-                "\nMenunggu koneksi HONOR..."
+                "\nDisplay: PUBLIC\n" +
+                "Menunggu koneksi HONOR..."
             );
 
         } catch (Exception e) {
