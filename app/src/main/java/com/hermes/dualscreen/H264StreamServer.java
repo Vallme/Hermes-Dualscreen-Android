@@ -18,6 +18,9 @@ public class H264StreamServer {
 
     private volatile boolean running = false;
 
+    private byte[] codecConfig;
+    private long configTimestamp;
+
     public synchronized void start() {
         if (running) return;
 
@@ -25,27 +28,38 @@ public class H264StreamServer {
 
         serverThread = new Thread(() -> {
             try {
-                serverSocket = new ServerSocket(PORT);
-                serverSocket.setReuseAddress(true);
+                ServerSocket server = new ServerSocket(PORT);
+                server.setReuseAddress(true);
+
+                synchronized (this) {
+                    serverSocket = server;
+                }
 
                 while (running) {
-                    Socket socket = serverSocket.accept();
+                    Socket socket = server.accept();
                     socket.setTcpNoDelay(true);
                     socket.setKeepAlive(true);
 
                     synchronized (this) {
                         closeClient();
+
                         clientSocket = socket;
                         output = new DataOutputStream(
                             socket.getOutputStream()
                         );
+
+                        if (codecConfig != null) {
+                            writePacket(
+                                0,
+                                configTimestamp,
+                                codecConfig
+                            );
+                        }
                     }
                 }
 
             } catch (IOException e) {
-                if (running) {
-                    e.printStackTrace();
-                }
+                if (running) e.printStackTrace();
             }
         });
 
@@ -65,26 +79,51 @@ public class H264StreamServer {
         int offset,
         int length
     ) {
+        if (type == 0) {
+            codecConfig = new byte[length];
+            System.arraycopy(
+                data, offset, codecConfig, 0, length
+            );
+            configTimestamp = timestamp;
+        }
+
         if (!isConnected()) return;
 
         try {
-            output.writeInt(MAGIC);
-            output.writeByte(type);
-            output.writeLong(timestamp);
-            output.writeInt(length);
-            output.write(data, offset, length);
-            output.flush();
-
+            writePacket(type, timestamp, data, offset, length);
         } catch (IOException e) {
             closeClient();
         }
     }
 
+    private void writePacket(
+        int type,
+        long timestamp,
+        byte[] data
+    ) throws IOException {
+        writePacket(type, timestamp, data, 0, data.length);
+    }
+
+    private void writePacket(
+        int type,
+        long timestamp,
+        byte[] data,
+        int offset,
+        int length
+    ) throws IOException {
+
+        output.writeInt(MAGIC);
+        output.writeByte(type);
+        output.writeLong(timestamp);
+        output.writeInt(length);
+        output.write(data, offset, length);
+        output.flush();
+    }
+
     private void closeClient() {
         try {
             if (clientSocket != null) clientSocket.close();
-        } catch (IOException ignored) {
-        }
+        } catch (IOException ignored) {}
 
         clientSocket = null;
         output = null;
@@ -96,7 +135,8 @@ public class H264StreamServer {
 
         try {
             if (serverSocket != null) serverSocket.close();
-        } catch (IOException ignored) {
-        }
+        } catch (IOException ignored) {}
+
+        serverSocket = null;
     }
 }
