@@ -4,6 +4,7 @@ package com.hermes.dualscreen;
 import android.app.Activity;
 import android.app.Presentation;
 import android.content.Context;
+import android.content.Intent;
 import android.graphics.Canvas;
 import android.graphics.Color;
 import android.graphics.Paint;
@@ -63,10 +64,17 @@ public class MainActivity extends Activity {
         stop.setText("STOP STREAMING");
         stop.setOnClickListener(v -> stopEncoder());
 
+        Button receiver = new Button(this);
+        receiver.setText("OPEN RECEIVER");
+        receiver.setOnClickListener(v ->
+            startActivity(new Intent(this, ReceiverActivity.class))
+        );
+
         layout.addView(title);
         layout.addView(status);
         layout.addView(start);
         layout.addView(stop);
+        layout.addView(receiver);
 
         setContentView(layout);
     }
