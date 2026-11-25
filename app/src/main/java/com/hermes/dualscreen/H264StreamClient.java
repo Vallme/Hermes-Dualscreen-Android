@@ -1,11 +1,9 @@
-
 package com.hermes.dualscreen;
 
 import android.media.MediaCodec;
 import android.media.MediaFormat;
 import android.view.Surface;
 
-import java.io.ByteArrayOutputStream;
 import java.io.DataInputStream;
 import java.net.Socket;
 import java.nio.ByteBuffer;
@@ -21,10 +19,14 @@ public class H264StreamClient {
     private MediaCodec decoder;
     private Thread thread;
 
-    public void start(String host, Surface surface,
-                      Listener listener) {
+    public void start(String host, Surface surface, Listener listener) {
 
         if (running) return;
+
+        if (surface == null || !surface.isValid()) {
+            listener.onStatus("Surface tidak tersedia");
+            return;
+        }
 
         running = true;
 
@@ -32,7 +34,10 @@ public class H264StreamClient {
             try {
                 Socket connection = new Socket(host, PORT);
                 socket = connection;
+
                 connection.setTcpNoDelay(true);
+                connection.setKeepAlive(true);
+                connection.setReceiveBufferSize(256 * 1024);
 
                 DataInputStream input =
                     new DataInputStream(connection.getInputStream());
@@ -61,19 +66,14 @@ public class H264StreamClient {
                     byte[] packet = new byte[length];
                     input.readFully(packet);
 
-                    // Paket 0 berisi konfigurasi SPS/PPS
                     if (type == 0) {
 
-                        if (decoder != null) {
-                            continue;
-                        }
+                        if (decoder != null) continue;
 
                         byte[][] config = extractSpsPps(packet);
 
                         if (config[0] == null || config[1] == null) {
-                            throw new Exception(
-                                "SPS/PPS tidak ditemukan dalam codec config"
-                            );
+                            throw new Exception("SPS/PPS tidak ditemukan");
                         }
 
                         MediaFormat format =
@@ -93,6 +93,12 @@ public class H264StreamClient {
                             ByteBuffer.wrap(config[1])
                         );
 
+                        // Meminta mode decoding latensi rendah.
+                        format.setInteger(
+                            MediaFormat.KEY_LOW_LATENCY,
+                            1
+                        );
+
                         decoder =
                             MediaCodec.createDecoderByType(
                                 MediaFormat.MIMETYPE_VIDEO_AVC
@@ -101,26 +107,19 @@ public class H264StreamClient {
                         decoder.configure(format, surface, null, 0);
                         decoder.start();
 
-                        listener.onStatus("DECODER SIAP - MENAMPILKAN VIDEO");
+                        listener.onStatus(
+                            "DECODER LOW LATENCY AKTIF"
+                        );
 
                         continue;
                     }
 
-                    // Jangan proses frame sebelum konfigurasi decoder
-                    if (decoder == null) {
-                        continue;
-                    }
+                    if (decoder == null) continue;
 
                     queueFrame(packet, timestamp);
 
-                    // Ambil hasil decoding dan tampilkan ke Surface
-                    int outputIndex;
-
-                    while ((outputIndex =
-                        decoder.dequeueOutputBuffer(info, 10000)) >= 0) {
-
-                        decoder.releaseOutputBuffer(outputIndex, true);
-                    }
+                    // Ambil semua frame yang sudah selesai tanpa menunggu.
+                    drainOutput(info);
                 }
 
             } catch (Exception e) {
@@ -142,18 +141,18 @@ public class H264StreamClient {
                 socket = null;
             }
 
-        });
+        }, "Hermes-LowLatency-Decoder");
 
         thread.start();
     }
 
-    private void queueFrame(byte[] packet,
-                            long timestamp) throws Exception {
+    private void queueFrame(byte[] packet, long timestamp)
+        throws Exception {
 
         int index = -1;
 
         while (running && index < 0) {
-            index = decoder.dequeueInputBuffer(10000);
+            index = decoder.dequeueInputBuffer(1000);
         }
 
         if (!running || index < 0) return;
@@ -161,7 +160,7 @@ public class H264StreamClient {
         ByteBuffer buffer = decoder.getInputBuffer(index);
 
         if (buffer == null) {
-            throw new Exception("Input buffer decoder kosong");
+            throw new Exception("Input buffer kosong");
         }
 
         buffer.clear();
@@ -181,7 +180,22 @@ public class H264StreamClient {
         );
     }
 
-    // Memisahkan NAL SPS dan PPS dari konfigurasi Annex-B
+    private void drainOutput(MediaCodec.BufferInfo info) {
+
+        if (decoder == null) return;
+
+        try {
+            int outputIndex;
+
+            while ((outputIndex =
+                decoder.dequeueOutputBuffer(info, 0)) >= 0) {
+
+                decoder.releaseOutputBuffer(outputIndex, true);
+            }
+
+        } catch (Exception ignored) {}
+    }
+
     private byte[][] extractSpsPps(byte[] data) {
 
         byte[] sps = null;
@@ -193,9 +207,7 @@ public class H264StreamClient {
 
             int prefix = startCodeLength(data, start);
             int nalStart = start + prefix;
-
             int next = findStartCode(data, nalStart);
-
             int nalEnd = next >= 0 ? next : data.length;
 
             if (nalStart < nalEnd) {
@@ -205,11 +217,7 @@ public class H264StreamClient {
                 byte[] nal = new byte[nalEnd - start];
 
                 System.arraycopy(
-                    data,
-                    start,
-                    nal,
-                    0,
-                    nal.length
+                    data, start, nal, 0, nal.length
                 );
 
                 if (nalType == 7) sps = nal;
@@ -230,9 +238,7 @@ public class H264StreamClient {
 
                 if (data[i + 2] == 1) return i;
 
-                if (i + 3 < data.length
-                    && data[i + 2] == 0
-                    && data[i + 3] == 1) {
+                if (data[i + 2] == 0 && data[i + 3] == 1) {
                     return i;
                 }
             }
@@ -242,10 +248,7 @@ public class H264StreamClient {
     }
 
     private int startCodeLength(byte[] data, int index) {
-
-        if (data[index + 2] == 1) return 3;
-
-        return 4;
+        return data[index + 2] == 1 ? 3 : 4;
     }
 
     public void stop() {
